@@ -1,5 +1,5 @@
-
 import platform
+import re
 import socket
 import subprocess
 
@@ -19,9 +19,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QMessageBox,
     QTableWidgetItem,
-
 )
-
 
 STYLE = """
 QMainWindow, QWidget {
@@ -108,7 +106,7 @@ def get_network_info():
             tokens = line.split()
 
             if "inet" in tokens:
-                info["ip"] = tokens[tokens.index("inet") + 1]
+                info["ip"] = tokens[tokens.index("inet") + 1].split("/")[0]
                 break
 
     return info
@@ -171,12 +169,14 @@ class DiagnosticWorker(QThread):
             results.append(f"HATA — DNS: {error}")
 
         self.result_ready.emit("\n".join(results))
-    
 
 
 class SysPilot(QMainWindow):
     def __init__(self):
         super().__init__()
+
+        self.hide_ip = False
+        self.raw_diagnostic_results = ""
 
         self.setWindowTitle("SysPilot | IT Diagnostic Assistant")
         self.resize(900, 680)
@@ -204,9 +204,28 @@ class SysPilot(QMainWindow):
         title_layout.addWidget(title)
         title_layout.addWidget(subtitle)
 
+        # IP Gizleme Butonu
+        self.toggle_ip_button = QPushButton("IP Gizle")
+        self.toggle_ip_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_ip_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2b2b30;
+                color: #eeeeef;
+                border: 1px solid #45454b;
+                border-radius: 8px;
+                padding: 11px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #383840;
+            }
+        """)
+        self.toggle_ip_button.clicked.connect(self.toggle_ip_visibility)
+
         self.scan_button = QPushButton("Taramayı Başlat")
         self.scan_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.scan_button.clicked.connect(self.run_diagnostics)
+
         self.close_button = QPushButton("Kapat")
         self.close_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.close_button.setStyleSheet("""
@@ -226,6 +245,7 @@ class SysPilot(QMainWindow):
 
         header.addLayout(title_layout)
         header.addStretch()
+        header.addWidget(self.toggle_ip_button)
         header.addWidget(self.scan_button)
         header.addWidget(self.close_button)
         root.addLayout(header)
@@ -315,9 +335,7 @@ class SysPilot(QMainWindow):
         process_title.setObjectName("sectionTitle")
 
         self.process_refresh_button = QPushButton("Listeyi Yenile")
-        self.process_refresh_button.clicked.connect(
-            self.refresh_processes
-        )
+        self.process_refresh_button.clicked.connect(self.refresh_processes)
 
         process_header.addWidget(process_title)
         process_header.addStretch()
@@ -362,21 +380,48 @@ class SysPilot(QMainWindow):
                 background-color: #aa3045;
             }
         """)
-        self.terminate_button.clicked.connect(
-            self.terminate_selected_process
-        )
+        self.terminate_button.clicked.connect(self.terminate_selected_process)
         process_layout.addWidget(self.terminate_button)
 
         root.addWidget(process_card)
-
 
         self.status_label = QLabel("Hazır")
         self.status_label.setObjectName("muted")
         root.addWidget(self.status_label)
 
+        # psutil için ilk sıfırlama ölçümü
         psutil.cpu_percent(interval=None)
+
         self.refresh_data()
         self.refresh_processes()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.refresh_data)
+        self.timer.start(3000)
+
+    def toggle_ip_visibility(self):
+        self.hide_ip = not self.hide_ip
+        if self.hide_ip:
+            self.toggle_ip_button.setText("IP Göster")
+        else:
+            self.toggle_ip_button.setText("IP Gizle")
+
+        self.refresh_data()
+        self.update_diagnostic_display()
+
+    def update_diagnostic_display(self):
+        if not self.raw_diagnostic_results:
+            return
+
+        text = self.raw_diagnostic_results
+        if self.hide_ip:
+            # Ağ geçidi satırındaki IP adresini maskele: Ağ geçidi (x.x.x.x) -> (***.***.***.***)
+            text = re.sub(
+                r"(Ağ geçidi \()[\d\.]+(\))",
+                r"\1***.***.***.***\2",
+                text,
+            )
+        self.results_label.setText(text)
 
     def terminate_selected_process(self):
         row = self.process_table.currentRow()
@@ -410,11 +455,9 @@ class SysPilot(QMainWindow):
             answer = QMessageBox.question(
                 self,
                 "İşlemi sonlandır",
-                f"{process_name} (PID: {pid}) işlemini "
-                "sonlandırmak istiyor musun?",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
+                f"{process_name} (PID: {pid}) işlemini sonlandırmak istiyor musun?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
 
             if answer != QMessageBox.StandardButton.Yes:
@@ -422,7 +465,6 @@ class SysPilot(QMainWindow):
 
             process = psutil.Process(pid)
 
-            # PID aynı kalsa bile işlemin değişmiş olma ihtimalini azaltır.
             if process.name() != process_name:
                 QMessageBox.warning(
                     self,
@@ -458,15 +500,14 @@ class SysPilot(QMainWindow):
                 f"İşlem sonlandırılamadı:\n{error}"
             )
 
-
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.refresh_data)
-        self.timer.start(3000)
-
     def refresh_data(self):
         cpu = psutil.cpu_percent(interval=None)
         memory = psutil.virtual_memory()
         net = get_network_info()
+
+        # IP gizleme filtresi
+        ip_display = "***.***.***.***" if self.hide_ip else net["ip"]
+        gateway_display = "***.***.***.***" if self.hide_ip else net["gateway"]
 
         try:
             disk = psutil.disk_usage("/")
@@ -492,7 +533,7 @@ class SysPilot(QMainWindow):
         self.disk_sub.setText(disk_text)
 
         self.net_value.setText(net["interface"])
-        self.net_sub.setText(f"Yerel IP: {net['ip']}")
+        self.net_sub.setText(f"Yerel IP: {ip_display}")
 
         self.system_label.setText(
             f"İşletim sistemi: {platform.system()} {platform.release()}\n"
@@ -505,10 +546,9 @@ class SysPilot(QMainWindow):
 
         self.network_label.setText(
             f"Ağ arayüzü: {net['interface']}  |  "
-            f"Yerel IP: {net['ip']}  |  "
-            f"Ağ geçidi: {net['gateway']}"
+            f"Yerel IP: {ip_display}  |  "
+            f"Ağ geçidi: {gateway_display}"
         )
-    
 
     def refresh_processes(self):
         self.process_refresh_button.setEnabled(False)
@@ -517,9 +557,7 @@ class SysPilot(QMainWindow):
         try:
             processes = []
 
-            for proc in psutil.process_iter(
-                ["pid", "name", "memory_info"]
-            ):
+            for proc in psutil.process_iter(["pid", "name", "memory_info"]):
                 try:
                     info = proc.info
                     memory_info = info.get("memory_info")
@@ -527,7 +565,7 @@ class SysPilot(QMainWindow):
                     if not memory_info:
                         continue
 
-                    cpu = proc.cpu_percent(interval=None)
+                    cpu = proc.cpu_percent(interval=0.0)
                     ram_mb = memory_info.rss / (1024 * 1024)
 
                     processes.append({
@@ -544,7 +582,6 @@ class SysPilot(QMainWindow):
                 ):
                     continue
 
-            # En fazla RAM kullanan işlemler üstte görünsün.
             processes.sort(
                 key=lambda item: item["ram"],
                 reverse=True,
@@ -564,27 +601,18 @@ class SysPilot(QMainWindow):
                     item = QTableWidgetItem(value)
 
                     if column in (1, 2, 3):
-                        item.setTextAlignment(
-                            Qt.AlignmentFlag.AlignCenter
-                        )
+                        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-                    self.process_table.setItem(
-                        row, column, item
-                    )
+                    self.process_table.setItem(row, column, item)
 
-            self.status_label.setText(
-                f"{len(processes)} işlem listelendi"
-            )
+            self.status_label.setText(f"{len(processes)} işlem listelendi")
 
         except Exception as error:
-            self.status_label.setText(
-                f"İşlem listesi alınamadı: {error}"
-            )
+            self.status_label.setText(f"İşlem listesi alınamadı: {error}")
 
         finally:
             self.process_refresh_button.setEnabled(True)
             self.process_refresh_button.setText("Listeyi Yenile")
-
 
     @staticmethod
     def get_uptime():
@@ -626,7 +654,8 @@ class SysPilot(QMainWindow):
         self.worker.start()
 
     def show_diagnostic_results(self, results):
-        self.results_label.setText(results)
+        self.raw_diagnostic_results = results
+        self.update_diagnostic_display()
 
     def diagnostics_finished(self):
         self.scan_button.setEnabled(True)
